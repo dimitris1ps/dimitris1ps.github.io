@@ -1,0 +1,296 @@
+---
+title: "OECD Country comparisons"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::html_clean:
+    highlight: kate
+---
+
+# Neve`r`ending race 
+
+When looking at OECD economic indicators, what comes to mind is rankings between countries.
+What follows is an attempt at visualizing this ...neverending race.
+
+
+## The `R` libraries
+
+Which are the libraries we will need and why
+
+`# devtools::install_github("jbkunst/highcharter")`   
+`# devtools::install_github("ramnathv/rblocks")`    
+`# devtools::install_github("woobe/rPlotter")`    
+
+```{r include=T, warning=F, echo=T, message=F}
+library(gdata) # reading xls
+library(dplyr) # data manipulation
+library(highcharter) # visualization
+library(stringdist) # some fuzzy text matching
+library(rvest) # getting data from the web
+library(rPlotter) # whats the color in the image?
+library(knitr) # kniting to pass the time
+library(magrittr) # human readable code
+
+```
+
+## User input
+
+The OECD indicators we will look at, are `Productivity` and `Unemployment`, for 10 counties in Europe, starting with productivity.
+
+```{r include=T, warning=F, echo=T, message=F}
+indicator <- c("GDP per hour worked"=".GDPHRWKD.TOT.IDX2010.A", "Unemployment"=".UNEMP.TOT.PC_LF.A")
+
+### End user selection ###
+ind <- indicator[1]
+YEARS <- 2001:2015
+selected_countries <- c("Austria", "Belgium", "Germany", "Spain", "Finland", 
+                        "France", "United Kingdom","Greece", "Ireland", "Iceland")
+
+```
+
+You can find a list of 234 countries to choose from within this linked [excel file](http://www.oecd.org/migration/mig/34107835.xls).
+
+# The data
+
+OECD uses abbreviations for the countries, lets use the mapping that is out there
+
+```{r include=T, warning=F, echo=T, message=F}
+
+# Get the countries and country abbreviations from OECD
+cntry_Abb <- read.xls("http://www.oecd.org/migration/mig/34107835.xls")[, 1:2]
+cntry_Abb$CODE <- gsub(".*-", "", cntry_Abb$CODE)
+cntry_Abb$Country <- as.character(cntry_Abb$Country)
+
+
+# Fixing some mistakes
+cntry_Abb$Country[cntry_Abb$CODE=="SO"] <- "South Korea"
+cntry_Abb$Country[cntry_Abb$CODE=="NS"] <- "North and South Korea"
+cntry_Abb <- rbind(cntry_Abb, cbind(CODE="KOR", Country="Korea"))
+cntry_Abb$Country[cntry_Abb$CODE=="UGA"] <- "Uganda"
+cntry_Abb$Country[cntry_Abb$CODE=="VAT"] <- "Vatican"
+
+
+# Get the selected indicator figures for the selected countries
+indic_url <- "https://stats.oecd.org/sdmx-json/data/DP_LIVE/%s%s/OECD?contentType=csv&detail=code&separator=comma&csv-lang=en&startPeriod=1998&endPeriod=2016"
+in_url <- sprintf(indic_url, paste0(cntry_Abb$CODE[tolower(cntry_Abb$Country) %in% tolower(selected_countries)], collapse="+"), ind)
+df <- read.csv(in_url)
+
+```
+
+Some data manipulation
+
+```{r include=T, warning=F, echo=T, message=F}
+names(df) <- c("CODE", "INDICATOR","SUBJECT","MEASURE","FREQUENCY","Year","Value","Flag.Codes")
+
+df %<>% left_join(cntry_Abb) %>% 
+  select(Country, Year, Value) %>% mutate(Value=round(Value, 1)) %>% 
+  filter(Country %in% selected_countries) %>% arrange(desc(Value)) %>% 
+  group_by(Year) %>% mutate(Rank=1, Rank=as.integer(cumsum(Rank))) %>% 
+  ungroup() %>% {.[complete.cases(.),]}
+
+
+kable(head(df,15), digits = 2)
+```
+
+
+
+<br>
+Lets fetch some flags, and fuzzy match them to the countries
+
+```{r include=T, warning=F, echo=T, message=F}
+
+# Getting flag icons
+flagUrl <- "http://www.iconarchive.com/show/round-world-flags-icons-by-custom-icon-design.%d.html"
+h <- lapply(sprintf(flagUrl, 1:6), function(x) read_html(x) %>% html_nodes(".icondetail img") %>% 
+              xml_attr("src"))
+flagUrls <- unlist(h)
+flagCountries <- sub(".*/(.*)\\.png", "\\1", flagUrls) %>% 
+  gsub("-icon", "", ., fixed=TRUE) %>% gsub("-", " ", .)
+
+# Some fuzzy matching on the countries
+df$urls <- paste0("url(",flagUrls[amatch(df$Country, flagCountries,  method = "cosine")], ")")
+
+# extract a color from the flag
+df$flagcolor <- gsub("url\\(|\\)", "", df$urls)
+flagcolor <- sapply(unique(df$flagcolor), function(x) extract_colours(x, 3)[2])
+df$flagcolor <- flagcolor[df$flagcolor]
+
+```
+
+
+# Prep the data
+
+```{r include=T, warning=F, echo=T, message=F}
+
+# prepare data for the chart
+df %<>% filter(Year %in% YEARS) %>% select(-Value)
+df$z <- 1
+
+
+cntr <- unique(df$Country)
+df1 <- lapply(cntr, function(i){
+  
+  df1 <- df %>% filter(Country == i) %>% arrange(Year) %>% 
+  {do.call(rbind, replicate(dim(.)[1], ., simplify = FALSE))} %>% 
+    group_by(Country, Year) %>% mutate(key=1, key=cumsum(key)) %>%
+    group_by(key) %>% mutate(key2=1, key2=cumsum(key2)) %>% 
+    ungroup() %>% mutate(Rank=ifelse(key<key2, NA, Rank))
+  
+  df1 %>% filter(key==1) %>% select(-key) %>% 
+    left_join(df1 %>% group_by(key2) %>% 
+                do(sequence = list_parse(select(.,x=Year, y=Rank, z=z))) %>% 
+                ungroup(), by="key2") %>% select(-key2)
+})
+
+
+bubble_df <- lapply(cntr, function(i){
+  
+  left_join(df %>% filter(Country==i) %>% arrange(Year) %>% slice(1), 
+            df %>% filter(Country==i) %>% arrange(Year) %>% group_by(Country) %>% 
+              do(sequence = list_parse(select(., x=Year, y=Rank, z=z))))
+
+})
+
+```
+
+
+
+# Let the race begin
+
+
+## Productivity
+
+``` {r include=T, warning=F, echo=T, message=F}
+# building the highchart
+hc_exp <- paste("highchart() %>% ", 
+                paste("hc_add_series(data = df1[[", 1:length(cntr), "]], 
+                      type = \"line\", hcaes(x = Year, y = Rank), 
+                      dashStyle='solid', enableMouseTracking=FALSE, 
+                      color=df1[[", 1:length(cntr), "]]$flagcolor[1],
+                      lineWidth=10,  marker=list(radius=4, fillColor=\"white\"), 
+                      name=\" \")", collapse=" %>% "), " %>% ",
+                
+                paste("hc_add_series(bubble_df[[", 1:length(cntr), "]], 
+                      type = \"bubble\", hcaes(x = Year, y = Rank, size = z), 
+                      name=bubble_df[[", 1:length(cntr), "]]$Country, 
+                      marker=list(symbol=bubble_df[[", 1:length(cntr), "]]$urls, 
+                      radius=2))", collapse=" %>% "), " %>% ", 
+                
+                "hc_yAxis(min = 0, max = ", length(cntr)+1,", reversed = TRUE, tickInterval=1, labels=\"\") %>%
+                hc_xAxis(min = 2001, max = 2016, tickInterval=1) %>%", 
+                
+                " hc_plotOptions(bubble=list(maxSize='10%')) %>% ",
+                
+                "hc_motion(enabled = TRUE, series = c(0:", (2*length(cntr)-1),"), startIndex = 0, updateInterval = 1, labels=\"<br><br><br><br><br>\") %>% 
+                  hc_chart(backgroundColor = '#eaecef')"
+                
+                )
+
+# What is that:
+# cat(hc_exp)
+
+```
+
+Higher rank higher productivity
+
+`eval` to the the rescue
+```{r include=T, warning=F, echo=T, message=F}
+eval(parse(text=hc_exp))
+```
+<br>
+As we can see because of the Subprime mortgage crisis there was a lot of movement in the years that followed 2008.
+Greece is another story by itself.
+
+## Unemployment
+
+higher rank, higher unemployment
+```{r include=F, warning=F, echo=T, message=F}
+ind <- indicator[2]
+YEARS <- 2003:2015
+
+indic_url <- "https://stats.oecd.org/sdmx-json/data/DP_LIVE/%s%s/OECD?contentType=csv&detail=code&separator=comma&csv-lang=en&startPeriod=1998&endPeriod=2016"
+in_url <- sprintf(indic_url, paste0(cntry_Abb$CODE[tolower(cntry_Abb$Country) %in% tolower(selected_countries)], collapse="+"), ind)
+df <- read.csv(in_url)
+
+names(df) <- c("CODE", "INDICATOR","SUBJECT","MEASURE","FREQUENCY","Year","Value","Flag.Codes")
+
+df %<>% left_join(cntry_Abb) %>% 
+  select(Country, Year, Value) %>% mutate(Value=round(Value, 1)) %>% 
+  filter(Country %in% selected_countries) %>% arrange(desc(Value)) %>% 
+  group_by(Year) %>% mutate(Rank=1, Rank=as.integer(cumsum(Rank))) %>% 
+  ungroup() %>% {.[complete.cases(.),]}
+
+
+# Getting flag icons
+flagUrl <- "http://www.iconarchive.com/show/round-world-flags-icons-by-custom-icon-design.%d.html"
+h <- lapply(sprintf(flagUrl, 1:6), function(x) read_html(x) %>% html_nodes(".icondetail img") %>% xml_attr("src"))
+flagUrls <- unlist(h)
+flagCountries <- sub(".*/(.*)\\.png", "\\1", flagUrls) %>% gsub("-icon", "", ., fixed=TRUE) %>% gsub("-", " ", .)
+
+# Some fuzzy matching on the countries
+df$urls <- paste0("url(",flagUrls[amatch(df$Country, flagCountries,  method = "cosine")], ")")
+
+# extract a color from the flag
+df$flagcolor <- gsub("url\\(|\\)", "", df$urls)
+flagcolor <- sapply(unique(df$flagcolor), function(x) extract_colours(x, 3)[2])
+df$flagcolor <- flagcolor[df$flagcolor]
+
+# prepare data for the chart
+df %<>% filter(Year %in% YEARS) %>% select(-Value)
+df$z <- 1
+
+
+cntr <- unique(df$Country)
+df1 <- lapply(cntr, function(i){
+  
+  df1 <- df %>% filter(Country == i) %>% arrange(Year) %>% 
+  {do.call(rbind, replicate(dim(.)[1], ., simplify = FALSE))} %>% 
+    group_by(Country, Year) %>% mutate(key=1, key=cumsum(key)) %>%
+    group_by(key) %>% mutate(key2=1, key2=cumsum(key2)) %>% 
+    ungroup() %>% mutate(Rank=ifelse(key<key2, NA, Rank))
+  
+  df1 %>% filter(key==1) %>% select(-key) %>% 
+    left_join(df1 %>% group_by(key2) %>% 
+                do(sequence = list_parse(select(.,x=Year, y=Rank, z=z))) %>% 
+                ungroup(), by="key2") %>% select(-key2)
+})
+
+
+bubble_df <- lapply(cntr, function(i){
+  
+  left_join(df %>% filter(Country==i) %>% arrange(Year) %>% slice(1), 
+            df %>% filter(Country==i) %>% arrange(Year) %>% group_by(Country) %>% 
+              do(sequence = list_parse(select(., x=Year, y=Rank, z=z))))
+
+})
+
+hc_unem <- paste("highchart() %>% 
+                 ", 
+                paste("hc_add_series(data = df1[[", 1:length(cntr), "]], type = \"line\", hcaes(x = Year, y = Rank), 
+                      dashStyle='solid', enableMouseTracking=FALSE, color=df1[[", 1:length(cntr), "]]$flagcolor[1],
+                      lineWidth=10,  marker=list(radius=4, fillColor=\"white\"), name=\" \")", collapse=" %>% 
+                      "), " %>% 
+                ",
+                
+                paste("hc_add_series(bubble_df[[", 1:length(cntr), "]], type = \"bubble\", hcaes(x = Year, y = Rank, size = z), 
+                      name=bubble_df[[", 1:length(cntr), "]]$Country, 
+                      marker=list(symbol=bubble_df[[", 1:length(cntr), "]]$urls, radius=2))", collapse=" %>% 
+                      "), " %>% 
+                ", 
+                
+                "hc_yAxis(min = 0, max = ", length(cntr)+1,", reversed = TRUE, tickInterval=1, labels=\"\") %>%
+
+                hc_xAxis(min = 2003, max = 2016, tickInterval=1) %>%", 
+                
+                " hc_plotOptions(bubble=list(maxSize='10%')) %>% ",
+                
+                "hc_motion(enabled = TRUE, series = c(0:", (2*length(cntr)-1),"), startIndex = 0, updateInterval = 1, labels = 1:15) %>% 
+                  hc_chart(backgroundColor = '#eaecef')"
+                
+                )
+
+```
+
+
+```{r}
+eval(parse(text=hc_unem))
+```
